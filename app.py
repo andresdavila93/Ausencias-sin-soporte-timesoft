@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-from datetime import timedelta, date
+from datetime import timedelta
 from io import BytesIO
 
 st.set_page_config(page_title="Ausencias sin soporte", layout="wide")
@@ -47,15 +47,19 @@ def expand_ranges(df, p_start, p_end, id_col="id", ini_col="ini", fin_col="fin")
             d += timedelta(days=1)
     return pd.DataFrame(out, columns=["id", "fecha"]).drop_duplicates() if out else pd.DataFrame(columns=["id", "fecha"])
 
-def safe_select(df, cols):
-    """Asegura columnas; si faltan se crean en NaN; retorna df[cols]."""
+def ensure_cols(df, cols):
+    """Crea columnas faltantes con NaN para evitar KeyError."""
     for c in cols:
         if c not in df.columns:
             df[c] = np.nan
+    return df
+
+def safe_select(df, cols):
+    df = ensure_cols(df, cols)
     return df[cols]
 
 # =========================================================
-# Parser Ausentismos SAP robusto
+# Parser Ausentismos SAP robusto (XLS / XLSX / HTML / Texto)
 # =========================================================
 def _parse_sap_from_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     date_re = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
@@ -125,15 +129,9 @@ def _parse_sap_from_text_lines(lines) -> pd.DataFrame:
     return pd.DataFrame(out) if out else pd.DataFrame(columns=["id", "ini", "fin", "pernr"])
 
 def parse_sap_report(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Lee Ausentismos SAP aunque venga como:
-    - XLS real (xlrd)
-    - XLSX (openpyxl)
-    - "XLS" que en realidad es HTML/Texto
-    """
     import io
 
-    # 1) intento Excel
+    # 1) Intento Excel según extensión
     try:
         if filename.endswith(".xls"):
             raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, header=None, engine="xlrd")
@@ -143,7 +141,7 @@ def parse_sap_report(file_bytes: bytes, filename: str) -> pd.DataFrame:
     except Exception:
         pass
 
-    # 2) intento HTML / texto
+    # 2) Intento HTML / texto
     try:
         txt = file_bytes.decode("utf-8", errors="ignore")
     except Exception:
@@ -158,11 +156,11 @@ def parse_sap_report(file_bytes: bytes, filename: str) -> pd.DataFrame:
         except Exception:
             pass
 
-    # 3) último intento: por líneas
+    # 3) Último intento por líneas
     return _parse_sap_from_text_lines(txt.splitlines())
 
 # =========================================================
-# Export Excel (Bytes)
+# Export Excel (bytes)
 # =========================================================
 def build_output_excel(dfs: dict) -> bytes:
     buffer = BytesIO()
@@ -175,15 +173,18 @@ def build_output_excel(dfs: dict) -> bytes:
 # =========================================================
 # UI
 # =========================================================
-st.title("📌 Consolidado: Ausencias sin soporte (TS + Ausentismos + SAP + Retiros + MD)")
+st.title("📌 Consolidado: Ausencias sin soporte")
 
 st.markdown(
     """
-**Qué hace:**
-- Identifica días dentro del periodo donde el empleado **no tiene marcación**, **no tiene ausentismo** (reporte ni SAP)
-- Considera vigencia por **Ingreso** y **Retiro** (Retiro = Desde - 1 día)
-- Activos: **solo funciones autorizadas** (archivo funciones_marcación)
-- Genera Excel con detalle por día y resumen por persona
+**Objetivo:** identificar días del periodo donde el empleado **no tiene marcación (TS)** y **no tiene ausentismo** (reporte + SAP),
+considerando **Ingreso** y **Retiro**.
+
+**Reglas:**
+- Retiro = **Desde - 1 día** (archivo Retiros)
+- Activos: solo se consideran si están en MasterData y su **Función** está en `funciones_marcación`
+- Si el retiro fue antes del periodo → se envía a hoja `Retiros_fuera_rango`
+- Si el ingreso es posterior al periodo → hoja `Ingresos_posteriores`
 """
 )
 
@@ -201,10 +202,10 @@ with c2:
 
 st.divider()
 
-colp1, colp2 = st.columns(2)
-with colp1:
+p1, p2 = st.columns(2)
+with p1:
     fecha_inicio = st.date_input("Fecha inicio del periodo")
-with colp2:
+with p2:
     fecha_fin = st.date_input("Fecha fin del periodo")
 
 run = st.button("🚀 Generar consolidado", type="primary")
@@ -236,12 +237,12 @@ if run:
         aussap2 = parse_sap_report(sap_bytes, sap_name)
 
         # -----------------------------
-        # Normalizar TS (Horas)
+        # TS (Horas)
         # -----------------------------
         horas2 = horas.copy()
-        # columnas esperadas según tu base
-        if "IdentificacionEmpleado" not in horas2.columns or "FechaEntrada" not in horas2.columns:
-            st.error("Rep_Horas_laboradas no tiene columnas esperadas (IdentificacionEmpleado, FechaEntrada).")
+        required_h = {"IdentificacionEmpleado", "FechaEntrada"}
+        if not required_h.issubset(set(horas2.columns)):
+            st.error(f"Rep_Horas_laboradas debe tener columnas: {required_h}")
             st.stop()
 
         horas2["id"] = horas2["IdentificacionEmpleado"].apply(clean_id)
@@ -249,11 +250,12 @@ if run:
         marc = horas2[horas2["id"].notna() & horas2["fecha"].notna()][["id", "fecha"]].drop_duplicates()
 
         # -----------------------------
-        # Normalizar Ausentismos (Reporte)
+        # Ausentismos Reporte
         # -----------------------------
         ausrep2 = ausrep.copy()
-        if "Identificacion" not in ausrep2.columns or "Fecha_Inicio" not in ausrep2.columns or "Fecha_Final" not in ausrep2.columns:
-            st.error("Rep_aususentismos no tiene columnas esperadas (Identificacion, Fecha_Inicio, Fecha_Final).")
+        required_ar = {"Identificacion", "Fecha_Inicio", "Fecha_Final"}
+        if not required_ar.issubset(set(ausrep2.columns)):
+            st.error(f"Rep_aususentismos debe tener columnas: {required_ar}")
             st.stop()
 
         ausrep2["id"] = ausrep2["Identificacion"].apply(clean_id)
@@ -262,28 +264,33 @@ if run:
         ausrep_days = expand_ranges(ausrep2, period_start, period_end)
 
         # -----------------------------
-        # Normalizar Retiros
+        # Retiros
         # -----------------------------
         retiros2 = retiros.copy()
-        if "Número ID" not in retiros2.columns or "Desde" not in retiros2.columns:
-            st.error("Retiros no tiene columnas esperadas (Número ID, Desde).")
+        required_r = {"Número ID", "Desde"}
+        if not required_r.issubset(set(retiros2.columns)):
+            st.error(f"Retiros debe tener columnas: {required_r}")
             st.stop()
 
         retiros2["id"] = retiros2["Número ID"].apply(clean_id)
         retiros2["Desde_dt"] = pd.to_datetime(retiros2["Desde"], errors="coerce").dt.date
         retiros2["FechaRetiro"] = retiros2["Desde_dt"].apply(lambda d: d - timedelta(days=1) if pd.notna(d) else None)
 
-        ret_list = retiros2.groupby("id")["FechaRetiro"].apply(lambda s: sorted(set([d for d in s.dropna()]))).reset_index()
+        ret_list = (
+            retiros2.groupby("id")["FechaRetiro"]
+            .apply(lambda s: sorted(set([d for d in s.dropna()])))
+            .reset_index()
+        )
         ret_list["RetiroEfectivo"] = ret_list["FechaRetiro"].apply(lambda lst: effective_date_from_list(lst, period_end))
         ret_list["ListaRetiros"] = ret_list["FechaRetiro"].apply(lambda lst: ", ".join([d.isoformat() for d in lst]) if isinstance(lst, list) else "")
 
         # -----------------------------
-        # Normalizar Master Data
+        # MasterData
         # -----------------------------
         md2 = md.copy()
-        needed_md = {"Número ID", "Función", "Clase de fecha", "Fecha"}
-        if not needed_md.issubset(set(md2.columns)):
-            st.error(f"Md_activos no tiene columnas esperadas: {needed_md}")
+        required_md = {"Número ID", "Función", "Clase de fecha", "Fecha"}
+        if not required_md.issubset(set(md2.columns)):
+            st.error(f"Md_activos debe tener columnas: {required_md}")
             st.stop()
 
         md2["id"] = md2["Número ID"].apply(clean_id)
@@ -293,27 +300,30 @@ if run:
         md2["ingreso"] = np.where(md2["clase_fecha"].str.lower().str.contains("alta"), md2["fecha_clase"], pd.NaT)
         md2["ingreso"] = pd.to_datetime(md2["ingreso"], errors="coerce").dt.date
 
-        # Funciones autorizadas
         if "Función" not in func.columns:
-            st.error("funciones_marcación no tiene la columna 'Función'.")
+            st.error("funciones_marcación debe tener la columna 'Función'.")
             st.stop()
 
         auth_funcs = set(func["Función"].dropna().astype(str).str.strip().unique())
         md2["autorizado_TS"] = md2["funcion"].isin(auth_funcs)
 
-        ing_list = md2.groupby("id")["ingreso"].apply(lambda s: sorted(set([d for d in s.dropna()]))).reset_index()
+        ing_list = (
+            md2.groupby("id")["ingreso"]
+            .apply(lambda s: sorted(set([d for d in s.dropna()])))
+            .reset_index()
+        )
         ing_list["IngresoEfectivo"] = ing_list["ingreso"].apply(lambda lst: effective_date_from_list(lst, period_end))
         ing_list["ListaIngresos"] = ing_list["ingreso"].apply(lambda lst: ", ".join([d.isoformat() for d in lst]) if isinstance(lst, list) else "")
 
         authorized_ids = set(md2.loc[md2["autorizado_TS"] & md2["id"].notna(), "id"].unique())
 
         # -----------------------------
-        # Expand SAP absences
+        # SAP expand a días
         # -----------------------------
         aussap_days = expand_ranges(aussap2, period_start, period_end)
 
         # -----------------------------
-        # Universo ID + Grid (id-fecha)
+        # Universo + Grid por día
         # -----------------------------
         ids_union = pd.Index(pd.concat([
             pd.Series(list(authorized_ids)),
@@ -363,7 +373,6 @@ if run:
 
         grid["vigente_dia"] = [vigente(d, i, r) for d, i, r in zip(grid["fecha"], grid["IngresoEfectivo"], grid["RetiroEfectivo"])]
 
-        # ausencia sin soporte
         grid["sin_soporte"] = (
             grid["vigente_dia"]
             & (~grid["tiene_marcacion"])
@@ -371,24 +380,28 @@ if run:
             & (~grid["tiene_aus_sap"])
         )
 
-        # considerar
+        # considerar:
+        # - activos: solo autorizado_TS
+        # - retirados o sin MD: se incluyen para análisis
         grid["considerar_activo_TS"] = (grid["estado_periodo"] == "Activo (MD)") & (grid["autorizado_TS"])
         grid["considerar"] = grid["considerar_activo_TS"] | grid["estado_periodo"].isin([
             "Retirado en el periodo", "Retirado antes del periodo", "Retiro despues del periodo", "Sin masterdata (posible retirado)"
         ])
 
         # -----------------------------
-        # Info maestra (Nombre / Empresa / etc.)
+        # Info maestra (desde horas/ausrep/md)
         # -----------------------------
-        info = []
+        info_parts = []
 
+        # horas
         cols_h = ["id","Codigo_Empleado","Nombres","Apellidos","Empresa","Sucursal","Dependencia","Municipio","Centro_Costos_Marcacion"]
         cols_h = [c for c in cols_h if c in horas2.columns]
         if cols_h:
             info_h = horas2[cols_h].drop_duplicates("id").copy()
             info_h = info_h.rename(columns={"Codigo_Empleado":"CodigoEmpleado","Nombres":"Nombre","Apellidos":"Apellido"})
-            info.append(info_h)
+            info_parts.append(info_h)
 
+        # ausrep
         cols_ar = ["id","Codigo_Empleado","Nombre_Empleado","Apellido_Empleado","Dependencia","Centro_De_Costo","Cargo"]
         cols_ar = [c for c in cols_ar if c in ausrep2.columns]
         if cols_ar:
@@ -399,15 +412,18 @@ if run:
                 "Apellido_Empleado":"Apellido",
                 "Centro_De_Costo":"CentroCosto"
             })
-            info.append(info_ar)
+            info_parts.append(info_ar)
 
-        info_md = md2[["id","funcion"]].drop_duplicates("id").copy()
-        info.append(info_md)
+        # md
+        info_md = md2[["id", "funcion"]].drop_duplicates("id").copy()
+        info_parts.append(info_md)
 
-        info_master = pd.concat(info, ignore_index=True, sort=False) if info else pd.DataFrame(columns=["id"])
-        info_master = info_master.groupby("id").agg(first_nonnull).reset_index() if not info_master.empty else info_master
-        info_master = info_master.merge(ret_list[["id","ListaRetiros"]], on="id", how="left")
-        info_master = info_master.merge(ing_list[["id","ListaIngresos"]], on="id", how="left")
+        info_master = pd.concat(info_parts, ignore_index=True, sort=False) if info_parts else pd.DataFrame(columns=["id"])
+        if not info_master.empty:
+            info_master = info_master.groupby("id").agg(first_nonnull).reset_index()
+
+        info_master = info_master.merge(ret_list[["id", "ListaRetiros"]], on="id", how="left")
+        info_master = info_master.merge(ing_list[["id", "ListaIngresos"]], on="id", how="left")
 
         # -----------------------------
         # SALIDAS
@@ -420,17 +436,25 @@ if run:
                 "Sin masterdata (posible retirado)":"Sin masterdata: sin marcación y sin ausentismo (Reporte + SAP) en el periodo"
             }.get(stt, "Sin marcación y sin ausentismo (Reporte + SAP)")
 
+        # Detalle por día
         aus_sin = grid[grid["considerar"] & grid["sin_soporte"]].merge(info_master, on="id", how="left")
         aus_sin["Observacion"] = aus_sin["estado_periodo"].map(obs)
 
-        desired_cols = [
+        desired_detail_cols = [
             "id","CodigoEmpleado","Nombre","Apellido","Empresa","Sucursal","Dependencia","Centro_Costos_Marcacion",
             "funcion","autorizado_TS","fecha","estado_periodo","IngresoEfectivo","RetiroEfectivo",
             "tiene_marcacion","tiene_aus_rep","tiene_aus_sap","Observacion","ListaIngresos","ListaRetiros"
         ]
-        aus_sin_out = safe_select(aus_sin, desired_cols).sort_values(["estado_periodo","id","fecha"])
+        aus_sin_out = safe_select(aus_sin, desired_detail_cols).sort_values(["estado_periodo","id","fecha"])
 
+        # Resumen por persona (ROBUSTO: asegura columnas antes del agg)
         g = grid[grid["considerar"]].merge(info_master, on="id", how="left")
+
+        summary_need_cols = [
+            "CodigoEmpleado","Nombre","Apellido","Empresa","Dependencia","funcion","ListaIngresos","ListaRetiros"
+        ]
+        g = ensure_cols(g, summary_need_cols)
+
         summary = g.groupby("id").agg(
             CodigoEmpleado=("CodigoEmpleado","first"),
             Nombre=("Nombre","first"),
@@ -455,14 +479,19 @@ if run:
         ultima_marc = g[g["tiene_marcacion"]].groupby("id")["fecha"].max().rename("UltimaMarcacion")
         summary = summary.merge(ultima_marc, on="id", how="left").sort_values(["estado_periodo","DiasSinSoporte"], ascending=[True, False])
 
+        # Retiros fuera de rango
         retiros_fuera = summary[summary["estado_periodo"] == "Retirado antes del periodo"].copy()
         retiros_fuera["TieneMovEnPeriodo"] = np.where(
-            (retiros_fuera["DiasConMarcacion"] > 0) | (retiros_fuera["DiasAusReporte"] > 0) | (retiros_fuera["DiasAusSAP"] > 0),
+            (retiros_fuera["DiasConMarcacion"] > 0)
+            | (retiros_fuera["DiasAusReporte"] > 0)
+            | (retiros_fuera["DiasAusSAP"] > 0),
             "SI", "NO"
         )
 
+        # Ingresos posteriores
         ing_post = summary[summary["estado_periodo"] == "Ingreso posterior al periodo"].copy()
 
+        # Inconsistencias (si hay marcación pero ingreso posterior / retiro<ingreso)
         incons = summary[
             ((summary["estado_periodo"] == "Ingreso posterior al periodo") & (summary["DiasConMarcacion"] > 0)) |
             ((summary["Ingreso"].notna()) & (summary["Retiro"].notna()) & (summary["Retiro"] < summary["Ingreso"]) & (summary["DiasConMarcacion"] > 0))
@@ -505,10 +534,8 @@ if run:
     st.success("Listo ✅. Abajo tienes el preview y el botón de descarga.")
 
     t1, t2 = st.tabs(["📄 Ausencias sin soporte (detalle)", "📊 Resumen por persona"])
-
     with t1:
         st.dataframe(aus_sin_out, use_container_width=True, height=520)
-
     with t2:
         st.dataframe(summary, use_container_width=True, height=520)
 
