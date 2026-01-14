@@ -448,23 +448,54 @@ if run:
         ]
         aus_sin_out = safe_select(aus_sin, desired_detail_cols).sort_values(["estado_periodo", "id", "fecha"])
 
-        g = grid[grid["considerar"]].merge(info_master, on="id", how="left")
+       # =========================
+# Resumen por persona (ROBUSTO)
+# =========================
 
-        summary = g.groupby("id").agg(
-            funcion=("funcion", "last"),
-            autorizado_TS=("autorizado_TS", "first"),
-            estado_periodo=("estado_periodo", "first"),
-            Ingreso=("IngresoEfectivo", "first"),
-            Retiro=("RetiroEfectivo", "first"),
-            ListaIngresos=("ListaIngresos", "first"),
-            ListaRetiros=("ListaRetiros", "first"),
-            DiasPeriodo=("fecha", "nunique"),
-            DiasVigente=("vigente_dia", "sum"),
-            DiasConMarcacion=("tiene_marcacion", "sum"),
-            DiasAusReporte=("tiene_aus_rep", "sum"),
-            DiasAusSAP=("tiene_aus_sap", "sum"),
-            DiasSinSoporte=("sin_soporte", "sum"),
-        ).reset_index()
+g = grid[grid["considerar"]].merge(info_master, on="id", how="left")
+
+# Asegurar columnas necesarias para el resumen (evita KeyError)
+need_cols = [
+    "funcion", "autorizado_TS", "estado_periodo",
+    "IngresoEfectivo", "RetiroEfectivo",
+    "ListaIngresos", "ListaRetiros",
+    "fecha", "vigente_dia",
+    "tiene_marcacion", "tiene_aus_rep", "tiene_aus_sap",
+    "sin_soporte"
+]
+missing_cols = [c for c in need_cols if c not in g.columns]
+if missing_cols:
+    log(f"[RESUMEN] Columnas faltantes en g (se crean vacías): {missing_cols}")
+    for c in missing_cols:
+        # Las banderas/contadores mejor como False (sum = 0)
+        if c in ["vigente_dia", "tiene_marcacion", "tiene_aus_rep", "tiene_aus_sap", "sin_soporte", "autorizado_TS"]:
+            g[c] = False
+        else:
+            g[c] = np.nan
+
+# Por si vienen como NaN por merges
+for c in ["vigente_dia", "tiene_marcacion", "tiene_aus_rep", "tiene_aus_sap", "sin_soporte", "autorizado_TS"]:
+    g[c] = g[c].fillna(False)
+
+summary = g.groupby("id").agg(
+    funcion=("funcion", "first"),
+    autorizado_TS=("autorizado_TS", "first"),
+    estado_periodo=("estado_periodo", "first"),
+    Ingreso=("IngresoEfectivo", "first"),
+    Retiro=("RetiroEfectivo", "first"),
+    ListaIngresos=("ListaIngresos", "first"),
+    ListaRetiros=("ListaRetiros", "first"),
+    DiasPeriodo=("fecha", "nunique"),
+    DiasVigente=("vigente_dia", "sum"),
+    DiasConMarcacion=("tiene_marcacion", "sum"),
+    DiasAusReporte=("tiene_aus_rep", "sum"),
+    DiasAusSAP=("tiene_aus_sap", "sum"),
+    DiasSinSoporte=("sin_soporte", "sum"),
+).reset_index()
+
+ultima_marc = g[g["tiene_marcacion"]].groupby("id")["fecha"].max().rename("UltimaMarcacion")
+summary = summary.merge(ultima_marc, on="id", how="left").sort_values(["estado_periodo", "DiasSinSoporte"], ascending=[True, False])
+
 
         ultima_marc = g[g["tiene_marcacion"]].groupby("id")["fecha"].max().rename("UltimaMarcacion")
         summary = summary.merge(ultima_marc, on="id", how="left").sort_values(["estado_periodo", "DiasSinSoporte"], ascending=[True, False])
