@@ -451,7 +451,7 @@ if run:
         g = grid[grid["considerar"]].merge(info_master, on="id", how="left")
 
         summary = g.groupby("id").agg(
-            funcion=("funcion", "first"),
+            funcion=("funcion", "last"),
             autorizado_TS=("autorizado_TS", "first"),
             estado_periodo=("estado_periodo", "first"),
             Ingreso=("IngresoEfectivo", "first"),
